@@ -1,0 +1,222 @@
+// package main
+
+// import (
+// 	"encoding/json"
+// 	"fmt"
+// 	"io/ioutil"
+// 	"net/http"
+// 	"sync"
+// 	"time"
+// )
+
+// // Definições de constantes para facilitar a configuração
+// const (
+// 	BaseURL   = "https://console.cloudvbox.com/api2/json"
+// 	AuthToken = "PVEAPIToken=root@pam!vbox=5639e614-5d8e-46e6-93ca-1a57a9238af0" // Substitua pelo seu token
+// )
+
+// type Node struct {
+// 	Node string `json:"node"`
+// }
+
+// type VM struct {
+// 	VMID   int    `json:"vmid"`
+// 	Name   string `json:"name"`
+// 	Status string `json:"status"`
+// }
+
+// type RRDData struct {
+// 	Time      int      `json:"time"`
+// 	MaxDisk   *float64 `json:"maxdisk,omitempty"`
+// 	MaxMem    *float64 `json:"maxmem,omitempty"`
+// 	MaxCPU    *float64 `json:"maxcpu,omitempty"`
+// 	Disk      *float64 `json:"disk,omitempty"`
+// 	DiskWrite *float64 `json:"diskwrite,omitempty"` // Presente apenas quando online
+// 	DiskRead  *float64 `json:"diskread,omitempty"`  // Presente apenas quando online
+// 	CPU       *float64 `json:"cpu,omitempty"`       // Presente apenas quando online
+// 	Mem       *float64 `json:"mem,omitempty"`       // Presente apenas quando online
+// 	NetOut    *float64 `json:"netout,omitempty"`    // Presente apenas quando online
+// 	NetIn     *float64 `json:"netin,omitempty"`     // Presente apenas quando online
+// }
+
+// // Função para criar um client HTTP com timeout
+// func createHTTPClient() *http.Client {
+// 	return &http.Client{Timeout: 10 * time.Second}
+// }
+
+// // Função para realizar o request e tratar a resposta
+// func fetchJSON(url string) ([]byte, error) {
+// 	client := createHTTPClient()
+// 	req, err := http.NewRequest("GET", url, nil)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+
+// 	req.Header.Set("Authorization", "Bearer "+AuthToken)
+// 	resp, err := client.Do(req)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	defer resp.Body.Close()
+
+// 	return ioutil.ReadAll(resp.Body)
+// }
+
+// // Busca todas as VMs e containers de um nó específico
+// func fetchVMs(node string) ([]VM, error) {
+// 	url := fmt.Sprintf("%s/nodes/%s/qemu", BaseURL, node)
+// 	body, err := fetchJSON(url)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+
+// 	var response struct {
+// 		Data []VM `json:"data"`
+// 	}
+// 	if err := json.Unmarshal(body, &response); err != nil {
+// 		return nil, err
+// 	}
+
+// 	return response.Data, nil
+// }
+// func fetchContainers(node string) ([]VM, error) {
+// 	url := fmt.Sprintf("%s/nodes/%s/lxc", BaseURL, node)
+// 	body, err := fetchJSON(url)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+
+// 	var response struct {
+// 		Data []VM `json:"data"`
+// 	}
+// 	if err := json.Unmarshal(body, &response); err != nil {
+// 		return nil, err
+// 	}
+
+// 	return response.Data, nil
+// }
+
+// // Busca os dados históricos de uma VM ou container
+// func fetchRRDData(node string, resourceType string, vmid int, timeframe string) ([]RRDData, error) {
+// 	url := fmt.Sprintf("%s/nodes/%s/%s/%d/rrddata?timeframe=%s", BaseURL, node, resourceType, vmid, timeframe)
+// 	body, err := fetchJSON(url)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+
+// 	var response struct {
+// 		Data []RRDData `json:"data"`
+// 	}
+// 	if err := json.Unmarshal(body, &response); err != nil {
+// 		return nil, err
+// 	}
+
+// 	return response.Data, nil
+// }
+
+// // Worker para buscar RRDData concorrente
+// func rrdWorker(wg *sync.WaitGroup, node string, resourceType string, vmid int, timeframe string, results chan<- map[int][]RRDData) {
+// 	defer wg.Done()
+// 	data, err := fetchRRDData(node, resourceType, vmid, timeframe)
+// 	if err != nil {
+// 		fmt.Printf("Erro ao buscar dados RRD para VMID %d: %v\n", vmid, err)
+// 		return
+// 	}
+// 	results <- map[int][]RRDData{vmid: data}
+// }
+
+// func main() {
+// 	node := "evbox03" // Substitua pelo nome do nó
+// 	timeframe := "hour"
+
+// 	// Etapa 1: Buscar VMs
+// 	vms, err := fetchVMs(node)
+// 	if err != nil {
+// 		fmt.Printf("Erro ao buscar VMs: %v\n", err)
+// 		return
+// 	}
+// 	fmt.Printf("Total de VMs encontradas: %d\n", len(vms))
+
+// 	// Etapa 1: Buscar VMs
+// 	lxcs, err := fetchContainers(node)
+// 	if err != nil {
+// 		fmt.Printf("Erro ao buscar Containers: %v\n", err)
+// 		return
+// 	}
+// 	fmt.Printf("Total de Containers encontrados: %d\n", len(lxcs))
+
+// 	// Canal para coletar resultados e WaitGroup para sincronizar
+// 	resultsQEMU := make(chan map[int][]RRDData, len(vms))
+// 	resultsLXC := make(chan map[int][]RRDData, len(lxcs))
+// 	var wgQEMU sync.WaitGroup
+// 	var wgLXC sync.WaitGroup
+
+// 	// Etapa 2: Disparar workers concorrentes para buscar RRDData
+// 	for _, vm := range vms {
+// 		wgQEMU.Add(1)
+// 		go rrdWorker(&wgQEMU, node, "qemu", vm.VMID, timeframe, resultsQEMU)
+// 	}
+// 	for _, lxc := range lxcs {
+// 		wgLXC.Add(1)
+// 		go rrdWorker(&wgLXC, node, "lxc", lxc.VMID, timeframe, resultsLXC)
+// 	}
+
+// 	// Fechar o canal após todos os workers finalizarem
+// 	go func() {
+// 		wgQEMU.Wait()
+// 		close(resultsQEMU)
+// 	}()
+// 	// Fechar o canal após todos os workers finalizarem
+// 	go func() {
+// 		wgLXC.Wait()
+// 		close(resultsLXC)
+// 	}()
+
+// 	// Etapa 3: Coletar resultados do canal
+// 	rrdResultsQEMU := make(map[int][]RRDData)
+// 	for result := range resultsQEMU {
+// 		for vmid, data := range result {
+// 			rrdResultsQEMU[vmid] = data
+// 		}
+// 	}
+// 	rrdResultsLXC := make(map[int][]RRDData)
+// 	for result := range resultsLXC {
+// 		for vmid, data := range result {
+// 			rrdResultsLXC[vmid] = data
+// 		}
+// 	}
+
+// 	// Etapa 4: Imprimir resultados
+// 	for vmid, data := range rrdResultsQEMU {
+// 		fmt.Printf("Dados históricos para VMID %d:\n", vmid)
+// 		for _, point := range data {
+// 			if point.CPU != nil { // Verifica se CPU não é nil (ou seja, está online)
+// 				cpuUsage := (*point.CPU / *point.MaxCPU) * 100
+// 				memUsage := (*point.Mem / *point.MaxMem) * 100
+// 				diskUsage := (*point.Disk / *point.MaxDisk) * 100
+// 				netInOut := (*point.NetIn / *point.NetOut) * 100
+// 				diskReadWrite := (*point.DiskRead / *point.DiskWrite) * 100
+
+// 				fmt.Printf("Time: %d VM está online, CPU: %.2f%%, Mem: %.2f%%, Disk: %.2f%%, NetInOut: %.2f%%, DiskReadWrite: %.2f%%\n", point.Time, cpuUsage, memUsage, diskUsage, netInOut, diskReadWrite)
+// 			} else {
+// 				fmt.Printf("Time: %d VM está offline\n", point.Time)
+// 			}
+// 		}
+// 	}
+// 	for vmid, data := range rrdResultsLXC {
+// 		fmt.Printf("Dados históricos para LXCID %d:\n", vmid)
+// 		for _, point := range data {
+// 			if point.CPU != nil { // Verifica se CPU não é nil (ou seja, está online)
+// 				cpuUsage := (*point.CPU / *point.MaxCPU) * 100
+// 				memUsage := (*point.Mem / *point.MaxMem) * 100
+// 				diskUsage := (*point.Disk / *point.MaxDisk) * 100
+// 				netInOut := (*point.NetIn / *point.NetOut) * 100
+// 				diskReadWrite := (*point.DiskRead / *point.DiskWrite) * 100
+
+// 				fmt.Printf("Time: %d LXC está online, CPU: %.2f%%, Mem: %.2f%%, Disk: %.2f%%, NetInOut: %.2f%%, DiskReadWrite: %.2f%%\n", point.Time, cpuUsage, memUsage, diskUsage, netInOut, diskReadWrite)
+// 			} else {
+// 				fmt.Printf("Time: %d LXC está offline\n", point.Time)
+// 			}
+// 		}
+// 	}
+// }

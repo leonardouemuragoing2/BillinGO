@@ -1,0 +1,342 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"net/http"
+	"sync"
+	"time"
+)
+
+const (
+	BaseURL   = "https://console.cloudvbox.com/api2/json"
+	AuthToken = "PVEAPIToken=root@pam!vbox=5639e614-5d8e-46e6-93ca-1a57a9238af0"
+)
+
+type ResourceType string
+
+const (
+	QEMU ResourceType = "qemu"
+	LXC  ResourceType = "lxc"
+)
+
+type Node struct {
+	SSLFingerprint string  `json:"ssl_fingerprint"`
+	MaxDisk        int64   `json:"maxdisk"`
+	Uptime         int64   `json:"uptime"`
+	Type           string  `json:"type"`
+	ID             string  `json:"id"`
+	Mem            int64   `json:"mem"`
+	Disk           int64   `json:"disk"`
+	Node           string  `json:"node"`
+	CPU            float64 `json:"cpu"`
+	Status         string  `json:"status"`
+	Level          string  `json:"level"`
+	MaxMem         int64   `json:"maxmem"`
+	MaxCPU         int     `json:"maxcpu"`
+}
+
+type VM struct {
+	VMID   int    `json:"vmid"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
+}
+
+type RRDData struct {
+	Time      int      `json:"time"`
+	MaxDisk   *float64 `json:"maxdisk,omitempty"`
+	MaxMem    *float64 `json:"maxmem,omitempty"`
+	MaxCPU    *float64 `json:"maxcpu,omitempty"`
+	Disk      *float64 `json:"disk,omitempty"`
+	DiskWrite *float64 `json:"diskwrite,omitempty"`
+	DiskRead  *float64 `json:"diskread,omitempty"`
+	CPU       *float64 `json:"cpu,omitempty"`
+	Mem       *float64 `json:"mem,omitempty"`
+	NetOut    *float64 `json:"netout,omitempty"`
+	NetIn     *float64 `json:"netin,omitempty"`
+}
+
+// Mapa global para armazenar os timestamps
+var vmTimestamps = make(map[int]int)
+
+func createHTTPClient() *http.Client {
+	return &http.Client{Timeout: 10 * time.Second}
+}
+
+func fetchJSON(url string) ([]byte, error) {
+	client := createHTTPClient()
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+AuthToken)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	return ioutil.ReadAll(resp.Body)
+}
+
+type ResourceFetcher interface {
+	FetchResources(node string) ([]VM, error)
+}
+
+type QEMUFetcher struct{}
+
+func (f QEMUFetcher) FetchResources(node string) ([]VM, error) {
+	url := fmt.Sprintf("%s/nodes/%s/qemu", BaseURL, node)
+	body, err := fetchJSON(url)
+	if err != nil {
+		return nil, err
+	}
+
+	var response struct {
+		Data []VM `json:"data"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, err
+	}
+
+	return response.Data, nil
+}
+
+type LXCFetcher struct{}
+
+func (f LXCFetcher) FetchResources(node string) ([]VM, error) {
+	url := fmt.Sprintf("%s/nodes/%s/lxc", BaseURL, node)
+	body, err := fetchJSON(url)
+	if err != nil {
+		return nil, err
+	}
+
+	var response struct {
+		Data []VM `json:"data"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, err
+	}
+
+	return response.Data, nil
+}
+
+func FetchNodes() ([]Node, error) {
+	url := fmt.Sprintf("%s/nodes", BaseURL)
+	body, err := fetchJSON(url)
+	if err != nil {
+		return nil, err
+	}
+
+	var response struct {
+		Data []Node `json:"data"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, err
+	}
+
+	return response.Data, nil
+}
+
+type FetcherFactory struct{}
+
+func (f FetcherFactory) GetFetcher(resourceType ResourceType) ResourceFetcher {
+	switch resourceType {
+	case QEMU:
+		return QEMUFetcher{}
+	case LXC:
+		return LXCFetcher{}
+	default:
+		return nil
+	}
+}
+
+func fetchRRDData(node string, resourceType string, vmid int, timeframe string) ([]RRDData, error) {
+	url := fmt.Sprintf("%s/nodes/%s/%s/%d/rrddata?timeframe=%s", BaseURL, node, resourceType, vmid, timeframe)
+	body, err := fetchJSON(url)
+	if err != nil {
+		return nil, err
+	}
+
+	var response struct {
+		Data []RRDData `json:"data"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, err
+	}
+
+	return response.Data, nil
+}
+
+func rrdWorker(wg *sync.WaitGroup, node string, resourceType string, vmid int, timeframe string, results chan<- map[int][]RRDData) {
+	defer wg.Done()
+	data, err := fetchRRDData(node, resourceType, vmid, timeframe)
+	if err != nil {
+		fmt.Printf("Erro ao buscar dados RRD para VMID %d: %v\n", vmid, err)
+		return
+	}
+	results <- map[int][]RRDData{vmid: data}
+}
+
+// func execute()
+
+// func main() {
+// 	nodes, err := FetchNodes()
+// 	if err != nil {
+// 		fmt.Println(err)
+// 		return
+// 	}
+// 	// TODO: rodar rotina para cada node dentro da lista de nodes usando o nodes[i].Node e adicionar um cronjob para que tudo que esta dentro da funcao main rode a cada 1min
+// 	node := "evbox03"
+// 	timeframe := "hour"
+
+// 	factory := FetcherFactory{}
+// 	resourceTypes := []ResourceType{QEMU, LXC}
+
+// 	for _, resourceType := range resourceTypes {
+// 		fetcher := factory.GetFetcher(resourceType)
+// 		if fetcher == nil {
+// 			fmt.Printf("Tipo de recurso desconhecido: %s\n", resourceType)
+// 			continue
+// 		}
+
+// 		resources, err := fetcher.FetchResources(node)
+// 		if err != nil {
+// 			fmt.Printf("Erro ao buscar recursos do tipo %s: %v\n", resourceType, err)
+// 			continue
+// 		}
+
+// 		fmt.Printf("Total de %s encontrados: %d\n", resourceType, len(resources))
+
+// 		results := make(chan map[int][]RRDData, len(resources))
+// 		var wg sync.WaitGroup
+
+// 		for _, resource := range resources {
+// 			wg.Add(1)
+// 			go rrdWorker(&wg, node, string(resourceType), resource.VMID, timeframe, results)
+// 		}
+
+// 		go func() {
+// 			wg.Wait()
+// 			close(results)
+// 		}()
+
+// 		rrdResults := make(map[int][]RRDData)
+// 		for result := range results {
+// 			for vmid, data := range result {
+// 				rrdResults[vmid] = data
+// 			}
+// 		}
+
+// 		for vmid, data := range rrdResults {
+// 			fmt.Printf("Dados históricos para %s ID %d:\n", resourceType, vmid)
+// 			for _, point := range data {
+// 				if point.CPU != nil { // Verifica se CPU não é nil (ou seja, está online)
+// 					cpuUsage := (*point.CPU / *point.MaxCPU) * 100
+// 					memUsage := (*point.Mem / *point.MaxMem) * 100
+// 					diskUsage := (*point.Disk / *point.MaxDisk) * 100
+// 					netInOut := (*point.NetIn / *point.NetOut) * 100
+// 					diskReadWrite := (*point.DiskRead / *point.DiskWrite) * 100
+
+// 					fmt.Printf("Time: %d %s está online, CPU: %.2f%%, Mem: %.2f%%, Disk: %.2f%%, NetInOut: %.2f%%, DiskReadWrite: %.2f%%\n", point.Time, resourceType, cpuUsage, memUsage, diskUsage, netInOut, diskReadWrite)
+// 				} else {
+// 					fmt.Printf("Time: %d %s está offline\n", point.Time, resourceType)
+// 				}
+// 			}
+// 		}
+// 	}
+// }
+
+func processNode(node string, timeframe string, resourceTypes []ResourceType) {
+	factory := FetcherFactory{}
+
+	for _, resourceType := range resourceTypes {
+		fetcher := factory.GetFetcher(resourceType)
+		if fetcher == nil {
+			fmt.Printf("Tipo de recurso desconhecido: %s\n", resourceType)
+			continue
+		}
+
+		resources, err := fetcher.FetchResources(node)
+		if err != nil {
+			fmt.Printf("Erro ao buscar recursos do tipo %s no nó %s: %v\n", resourceType, node, err)
+			continue
+		}
+
+		fmt.Printf("Total de %s encontrados no nó %s: %d\n", resourceType, node, len(resources))
+
+		results := make(chan map[int][]RRDData, len(resources))
+		var wg sync.WaitGroup
+
+		for _, resource := range resources {
+			wg.Add(1)
+			go func(vmid int) {
+				defer wg.Done()
+				data, err := fetchRRDData(node, string(resourceType), vmid, timeframe)
+				if err != nil {
+					fmt.Printf("Erro ao buscar dados RRD para VMID %d: %v\n", vmid, err)
+					return
+				}
+				results <- map[int][]RRDData{vmid: data}
+			}(resource.VMID)
+		}
+
+		go func() {
+			wg.Wait()
+			close(results)
+		}()
+
+		rrdResults := make(map[int][]RRDData)
+		for result := range results {
+			for vmid, data := range result {
+				rrdResults[vmid] = data
+			}
+		}
+
+		for vmid, data := range rrdResults {
+			fmt.Printf("--- Dados históricos para %s ID %d no nó %s:\n", resourceType, vmid, node)
+			for _, point := range data {
+				// Atualiza o timestamp para o VMID
+				if vmTimestamps[vmid] != 0 && vmTimestamps[vmid] >= point.Time {
+					continue
+				}
+				vmTimestamps[vmid] = point.Time
+
+				if point.CPU != nil { // Verifica se CPU não é nil (ou seja, está online)
+					cpuUsage := (*point.CPU / *point.MaxCPU) * 100
+					memUsage := (*point.Mem / *point.MaxMem) * 100
+					diskUsage := (*point.Disk / *point.MaxDisk) * 100
+					netInOut := (*point.NetIn / *point.NetOut) * 100
+					diskReadWrite := (*point.DiskRead / *point.DiskWrite) * 100
+
+					fmt.Printf("Time: %s %s ON, CPU: %.2f / %.2f | Mem: %.2f / %.2f | Disk:%.2f / %.2f | NetInOut: %.2f / %.2f |  DiskReadWrite: %.2f / %.2f \n", time.Unix(int64(point.Time), 0), resourceType, *point.CPU, *point.MaxCPU, *point.Mem, *point.MaxMem, *point.Disk, *point.MaxDisk, *point.NetIn, *point.NetOut, *point.DiskRead, *point.DiskWrite)
+				} else {
+					fmt.Printf("Time: %s %s OFF\n", time.Unix(int64(point.Time), 0), resourceType)
+				}
+			}
+		}
+	}
+}
+
+func main() {
+	resourceTypes := []ResourceType{QEMU, LXC}
+	timeframe := "hour"
+
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		nodes, err := FetchNodes()
+		if err != nil {
+			fmt.Printf("Erro ao buscar nodes: %v\n", err)
+			continue
+		}
+
+		for _, node := range nodes {
+			go processNode(node.Node, timeframe, resourceTypes)
+		}
+
+		<-ticker.C
+	}
+}
